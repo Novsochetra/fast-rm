@@ -24,28 +24,19 @@ fn main() {
 
     println!("Removing directory '{}'", dir);
 
-    // Single WalkDir pass
-    let mut files: Vec<_> = Vec::new();
-    let mut dirs: Vec<_> = Vec::new();
+    // Collect all files
+    let files: Vec<_> = WalkDir::new(&dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .collect();
 
-    for entry in WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.file_name().map_or(false, |n| {
-            let s = n.to_string_lossy();
-            s.starts_with("._") || s == ".DS_Store"
-        }) {
-            continue;
-        }
-
-        if entry.file_type().is_file() {
-            files.push(path.to_path_buf());
-        } else if entry.file_type().is_dir() {
-            dirs.push(path.to_path_buf());
-        }
-    }
-
-    // Sort directories bottom-up
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    // Collect all directories (for bottom-up removal)
+    let dirs: Vec<_> = WalkDir::new(&dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_dir())
+        .collect();
 
     let total_items = files.len() + dirs.len();
     let pb = ProgressBar::new(total_items as u64);
@@ -58,16 +49,49 @@ fn main() {
     );
 
     // Delete files in parallel
-    files.par_iter().for_each(|path| {
-        let _ = fs::remove_file(path);
+    files.par_iter().for_each(|entry| {
+        let path = entry.path();
+
+        if let Some(name) = path.file_name() {
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("._") || name_str == ".DS_Store" {
+                pb.inc(1);
+                return;
+            }
+        }
+
+        if let Err(err) = fs::remove_file(path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Failed to remove file {}: {}", path.display(), err);
+            }
+        }
+
         pb.inc(1);
     });
 
-    // Delete directories in parallel
-    dirs.par_iter().for_each(|path| {
-        let _ = fs::remove_dir(path);
-        pb.inc(1);
-    });
+    // Remove directories bottom-up
+    for dir_entry in dirs.iter().rev() {
+        let path = dir_entry.path();
+
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    let _ = fs::remove_file(&p);
+                } else if p.is_dir() {
+                    let _ = fs::remove_dir_all(&p);
+                }
+            }
+        }
+
+        if let Err(err) = fs::remove_dir(path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Failed to remove directory {}: {}", path.display(), err);
+            }
+        }
+
+        pb.inc(1); // Increment progress for the directory
+    }
 
     pb.finish_with_message("✅ Directory fully removed!");
 }
