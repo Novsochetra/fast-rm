@@ -24,20 +24,28 @@ fn main() {
 
     println!("Removing directory '{}'", dir);
 
-    // Collect all files
-    let files: Vec<_> = WalkDir::new(&dir)
+    let entries: Vec<_> = WalkDir::new(&dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
         .collect();
 
-    // Collect all directories (for bottom-up removal)
-    let dirs: Vec<_> = WalkDir::new(&dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_dir())
-        .collect();
+    // Split into files and directories
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
 
+    for entry in &entries {
+        let path = entry.path();
+
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() || meta.file_type().is_file() {
+                files.push(path.to_path_buf());
+            } else if meta.file_type().is_dir() {
+                dirs.push(path.to_path_buf());
+            }
+        }
+    }
+
+    // Progress bar
     let total_items = files.len() + dirs.len();
     let pb = ProgressBar::new(total_items as u64);
     pb.set_style(
@@ -48,49 +56,33 @@ fn main() {
         .progress_chars("#>-"),
     );
 
-    // Delete files in parallel
-    files.par_iter().for_each(|entry| {
-        let path = entry.path();
-
-        if let Some(name) = path.file_name() {
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("._") || name_str == ".DS_Store" {
-                pb.inc(1);
-                return;
-            }
-        }
-
+    // Remove files and symlinks in parallel
+    files.par_iter().for_each(|path| {
         if let Err(err) = fs::remove_file(path) {
             if err.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Failed to remove file {}: {}", path.display(), err);
+                eprintln!("Failed to remove file/symlink {}: {}", path.display(), err);
             }
         }
-
         pb.inc(1);
     });
 
-    // Remove directories bottom-up
-    for dir_entry in dirs.iter().rev() {
-        let path = dir_entry.path();
+    // Remove dirs (bottom-up)
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
 
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_file() {
-                    let _ = fs::remove_file(&p);
-                } else if p.is_dir() {
-                    let _ = fs::remove_dir_all(&p);
+    for dir_path in dirs {
+        if let Ok(meta) = fs::symlink_metadata(&dir_path) {
+            if meta.file_type().is_symlink() {
+                // Just unlink symlink dir
+                let _ = fs::remove_file(&dir_path);
+            } else {
+                if let Err(err) = fs::remove_dir(&dir_path) {
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("Failed to remove directory {}: {}", dir_path.display(), err);
+                    }
                 }
             }
         }
-
-        if let Err(err) = fs::remove_dir(path) {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Failed to remove directory {}: {}", path.display(), err);
-            }
-        }
-
-        pb.inc(1); // Increment progress for the directory
+        pb.inc(1);
     }
 
     pb.finish_with_message("✅ Directory fully removed!");
