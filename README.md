@@ -1,4 +1,5 @@
 # fast-rm
+**Remove** _large file / folder_ can be a big pain if we are using rm -rf command, this utility help process copying file in parallel
 
 ### Usage
 `cargo run --release -- "DELETE_FOLDER_PATH"`
